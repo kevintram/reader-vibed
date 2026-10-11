@@ -57,10 +57,6 @@ body {
   padding: 4em 1.25em 40vh;
 }
 
-#book:empty {
-  display: none;
-}
-
 /* Skip layout and paint for chapters far off screen. 12000px is roughly an
    average chapter; `auto` remembers each one's real height once rendered. */
 #book section {

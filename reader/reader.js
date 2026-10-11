@@ -129,11 +129,6 @@ async function openBook(file) {
   document.title = title || file.name;
   dropEl.hidden = true;
 
-  // Images change the layout once they have a size, so wait for them before
-  // restoring. decode() rejects for broken images, which have no size to wait for.
-  const images = [...bookEl.querySelectorAll('img')];
-  await Promise.all(images.map((img) => img.decode().catch(() => {})));
-
   book = { key: `reader:pos:${identifier || file.name}`, blobs: ctx.blobs };
   await restorePosition();
 }
@@ -328,6 +323,12 @@ async function restorePosition() {
     scrollTo(0, 0);
     return;
   }
+
+  // Images change the layout once they have a size, so wait for the ones in
+  // the saved section. Sections elsewhere keep placeholder heights, so theirs
+  // don't matter. decode() rejects for broken images, which have no size.
+  const images = [...section.querySelectorAll('img')];
+  await Promise.all(images.map((img) => img.decode().catch(() => {})));
 
   let target = section.offsetTop;
   for (let attempt = 0; attempt < RESTORE_MAX_ATTEMPTS; attempt++) {
