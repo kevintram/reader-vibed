@@ -57,21 +57,27 @@
 <script>
 const drop = document.getElementById('drop');
 const bookEl = document.getElementById('book');
+const XLINK = 'http://www.w3.org/1999/xlink';
 let currentKey = null;
 let blobUrls = [];
 
 // --- File input / drag and drop ---------------------------------------------
 
-drop.querySelector('input').addEventListener('change', e => {
-  if (e.target.files[0]) open(e.target.files[0]);
-});
+function onFile(file) {
+  if (!file) return;
+  openBook(file).catch(err => {
+    console.error(err);
+    alert('Could not open that file as an EPUB.');
+  });
+}
+
+drop.querySelector('input').addEventListener('change', e => onFile(e.target.files[0]));
 addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
 addEventListener('dragleave', e => { if (!e.relatedTarget) drop.classList.remove('over'); });
 addEventListener('drop', e => {
   e.preventDefault();
   drop.classList.remove('over');
-  const file = e.dataTransfer.files[0];
-  if (file) open(file);
+  onFile(e.dataTransfer.files[0]);
 });
 
 // --- Path helpers ------------------------------------------------------------
@@ -97,44 +103,34 @@ const isExternal = href => /^[a-z][a-z0-9+.-]*:/i.test(href);
 
 // --- Loading -----------------------------------------------------------------
 
-async function open(file) {
-  let zip;
-  try {
-    zip = await JSZip.loadAsync(file);
-  } catch {
-    alert('Could not open that file as an EPUB.');
-    return;
-  }
+// container.xml -> OPF -> metadata, reading order and media types.
+async function readPackage(zip) {
+  const xml = async path =>
+    new DOMParser().parseFromString(await zip.file(path).async('text'), 'application/xml');
 
-  const xml = async path => {
-    const entry = zip.file(path);
-    if (!entry) throw new Error(`Missing ${path}`);
-    return new DOMParser().parseFromString(await entry.async('text'), 'application/xml');
-  };
-
-  // container.xml -> OPF
   const container = await xml('META-INF/container.xml');
   const opfPath = container.querySelector('rootfile').getAttribute('full-path');
-  const opfDir = dirname(opfPath);
   const opf = await xml(opfPath);
 
-  const manifest = new Map();
+  const pathById = new Map();
+  const typeByPath = new Map();
   for (const item of opf.querySelectorAll('manifest > item')) {
-    manifest.set(item.getAttribute('id'), {
-      path: resolve(opfDir, item.getAttribute('href')).path,
-      type: item.getAttribute('media-type'),
-    });
+    const { path } = resolve(dirname(opfPath), item.getAttribute('href'));
+    pathById.set(item.getAttribute('id'), path);
+    typeByPath.set(path, item.getAttribute('media-type'));
   }
   const spine = [...opf.querySelectorAll('spine > itemref')]
     .filter(ref => ref.getAttribute('linear') !== 'no')
-    .map(ref => manifest.get(ref.getAttribute('idref')))
+    .map(ref => pathById.get(ref.getAttribute('idref')))
     .filter(Boolean);
 
-  const title = opf.getElementsByTagNameNS('*', 'title')[0]?.textContent.trim() || file.name;
-  const identifier = opf.getElementsByTagNameNS('*', 'identifier')[0]?.textContent.trim();
+  const meta = name => opf.getElementsByTagNameNS('*', name)[0]?.textContent.trim();
+  return { title: meta('title'), identifier: meta('identifier'), spine, typeByPath };
+}
 
-  // Media types by path, for blob URLs.
-  const typeByPath = new Map([...manifest.values()].map(m => [m.path, m.type]));
+async function openBook(file) {
+  const zip = await JSZip.loadAsync(file);
+  const { title, identifier, spine, typeByPath } = await readPackage(zip);
 
   // Each zip resource gets one blob URL, created on first use.
   blobUrls.forEach(URL.revokeObjectURL);
@@ -144,8 +140,8 @@ async function open(file) {
     if (!blobCache.has(path)) {
       const entry = zip.file(path);
       blobCache.set(path, entry
-        ? entry.async('blob').then(b => {
-            const url = URL.createObjectURL(new Blob([b], { type: typeByPath.get(path) || '' }));
+        ? entry.async('uint8array').then(bytes => {
+            const url = URL.createObjectURL(new Blob([bytes], { type: typeByPath.get(path) || '' }));
             blobUrls.push(url);
             return url;
           })
@@ -155,20 +151,20 @@ async function open(file) {
   };
 
   // Section index per spine path, so cross-file links can become in-page anchors.
-  const sectionOf = new Map(spine.map((item, i) => [item.path, i]));
+  const sectionOf = new Map(spine.map((path, i) => [path, i]));
 
   const fragment = document.createDocumentFragment();
   const pending = [];
 
-  for (const [i, item] of spine.entries()) {
-    const entry = zip.file(item.path);
+  for (const [i, chapterPath] of spine.entries()) {
+    const entry = zip.file(chapterPath);
     if (!entry) continue;
     const text = await entry.async('text');
 
     let doc = new DOMParser().parseFromString(text, 'application/xhtml+xml');
     if (doc.querySelector('parsererror')) doc = new DOMParser().parseFromString(text, 'text/html');
 
-    const dir = dirname(item.path);
+    const dir = dirname(chapterPath);
     const body = doc.body || doc.getElementsByTagName('body')[0];
     if (!body) continue;
 
@@ -190,29 +186,22 @@ async function open(file) {
     // Prefix ids so they stay unique across chapters.
     section.querySelectorAll('[id]').forEach(el => { el.id = `s${i}-${el.id}`; });
 
-    // Images (HTML <img> and SVG <image>) -> blob URLs from the zip.
-    for (const img of section.querySelectorAll('img[src]')) {
-      const src = img.getAttribute('src');
-      if (isExternal(src)) continue;
-      img.removeAttribute('src');
-      pending.push(blobUrl(resolve(dir, src).path).then(url => { img.src = url; }));
-    }
-    for (const img of section.querySelectorAll('image')) {
-      const src = img.getAttribute('href') || img.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+    // Images (HTML <img src> and SVG <image href>) -> blob URLs from the zip.
+    // The relative URL is removed first so the browser doesn't try to fetch it.
+    for (const img of section.querySelectorAll('img, image')) {
+      const attr = img.localName === 'img' ? 'src' : 'href';
+      const src = img.getAttribute(attr) || img.getAttributeNS(XLINK, 'href');
       if (!src || isExternal(src)) continue;
-      img.removeAttribute('href');
-      img.removeAttributeNS('http://www.w3.org/1999/xlink', 'href');
-      pending.push(blobUrl(resolve(dir, src).path).then(url => {
-        img.setAttribute('href', url);
-        img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', url);
-      }));
+      img.removeAttribute(attr);
+      img.removeAttributeNS(XLINK, 'href');
+      pending.push(blobUrl(resolve(dir, src).path).then(url => img.setAttribute(attr, url)));
     }
 
     // Links: same-book -> in-page anchors, external -> new tab.
     for (const a of section.querySelectorAll('a[href]')) {
       const href = a.getAttribute('href');
       if (isExternal(href)) { a.target = '_blank'; a.rel = 'noopener'; continue; }
-      const { path, hash } = href.startsWith('#') ? { path: item.path, hash: href.slice(1) } : resolve(dir, href);
+      const { path, hash } = href.startsWith('#') ? { path: chapterPath, hash: href.slice(1) } : resolve(dir, href);
       const target = sectionOf.get(path);
       if (target === undefined) { a.removeAttribute('href'); continue; }
       a.setAttribute('href', hash ? `#s${target}-${hash}` : `#s${target}`);
@@ -223,8 +212,11 @@ async function open(file) {
 
   await Promise.all(pending);
 
+  // Stop saving positions until the new book's position is restored, or the
+  // scroll caused by swapping content would overwrite the previous book's.
+  currentKey = null;
   bookEl.replaceChildren(fragment);
-  document.title = title;
+  document.title = title || file.name;
   drop.hidden = true;
 
   // Wait for images to have their real size before restoring the position.
