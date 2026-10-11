@@ -47,10 +47,12 @@ function resolveHref(fromPath, href) {
   if (!relPath) return { path: fromPath, hash };
 
   const out = [];
-  for (const part of (dirname(fromPath) + decodeURIComponent(relPath)).split('/')) {
+  const parts = (dirname(fromPath) + decodeURIComponent(relPath)).split('/');
+  for (const part of parts) {
     if (part === '..') out.pop();
     else if (part !== '.' && part !== '') out.push(part);
   }
+
   return { path: out.join('/'), hash };
 }
 
@@ -85,7 +87,9 @@ class BlobUrls {
   }
 
   revokeAll() {
-    for (const url of this.#urls.values()) url.then(URL.revokeObjectURL);
+    for (const url of this.#urls.values()) {
+      url.then(URL.revokeObjectURL);
+    }
   }
 
   async #create(path) {
@@ -113,7 +117,9 @@ async function openBook(file) {
     blobs: new BlobUrls(zip, typeByPath),
     sectionIndexByPath: new Map(spine.map((path, index) => [path, index])),
   };
-  const sections = await Promise.all(spine.map((path, index) => loadChapter(ctx, path, index)));
+  const sections = await Promise.all(
+    spine.map((path, index) => loadChapter(ctx, path, index)),
+  );
 
   // Close first so nothing is saved until the new position is restored:
   // swapping content scrolls the page, and that scroll must not overwrite the
@@ -126,7 +132,7 @@ async function openBook(file) {
   // Images change the layout once they have a size, so wait for them before
   // restoring. decode() rejects for broken images, which have no size to wait for.
   const images = [...bookEl.querySelectorAll('img')];
-  await Promise.all(images.map(img => img.decode().catch(() => {})));
+  await Promise.all(images.map((img) => img.decode().catch(() => {})));
 
   book = { key: `reader:pos:${identifier || file.name}`, blobs: ctx.blobs };
   await restorePosition();
@@ -155,8 +161,15 @@ async function readPackage(zip) {
     .map(ref => pathById.get(ref.getAttribute('idref')))
     .filter(Boolean);
 
-  const metadata = name => opf.getElementsByTagNameNS('*', name)[0]?.textContent.trim();
-  return { title: metadata('title'), identifier: metadata('identifier'), spine, typeByPath };
+  const metadata = (name) =>
+    opf.getElementsByTagNameNS('*', name)[0]?.textContent.trim();
+
+  return {
+    title: metadata('title'),
+    identifier: metadata('identifier'),
+    spine,
+    typeByPath,
+  };
 }
 
 // Throws if the file is missing, which openFile reports as a bad EPUB.
@@ -174,9 +187,15 @@ async function loadChapter(ctx, path, index) {
   const body = await readChapterBody(ctx.zip, path);
   if (!body) return section;
 
-  for (const node of [...body.childNodes]) section.append(document.importNode(node, true));
+  for (const node of [...body.childNodes]) {
+    section.append(document.importNode(node, true));
+  }
+
   cleanMarkup(section);
-  for (const el of section.querySelectorAll('[id]')) el.id = sectionId(index, el.id);
+  for (const el of section.querySelectorAll('[id]')) {
+    el.id = sectionId(index, el.id);
+  }
+
   rewriteLinks(section, path, ctx.sectionIndexByPath);
   await rewriteImages(section, path, ctx.blobs);
   return section;
@@ -204,19 +223,29 @@ async function readChapterBody(zip, path) {
 // would leave big empty gaps, with empty spans carrying their ids so links to
 // them still work.
 function cleanMarkup(section) {
-  for (const el of section.querySelectorAll('script, style, link, meta')) el.remove();
-  for (const el of section.querySelectorAll('[style]')) el.removeAttribute('style');
+  for (const el of section.querySelectorAll('script, style, link, meta')) {
+    el.remove();
+  }
+
+  for (const el of section.querySelectorAll('[style]')) {
+    el.removeAttribute('style');
+  }
 
   for (const heading of section.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
     const isEmpty = !heading.textContent.trim() && !heading.querySelector('img, svg');
     if (!isEmpty) continue;
 
-    const ids = [heading, ...heading.querySelectorAll('[id]')].map(el => el.id).filter(Boolean);
-    heading.replaceWith(...ids.map(id => {
-      const span = document.createElement('span');
-      span.id = id;
-      return span;
-    }));
+    const ids = [heading, ...heading.querySelectorAll('[id]')]
+      .map((el) => el.id)
+      .filter(Boolean);
+
+    heading.replaceWith(
+      ...ids.map((id) => {
+        const span = document.createElement('span');
+        span.id = id;
+        return span;
+      }),
+    );
   }
 }
 
@@ -255,8 +284,9 @@ async function rewriteImages(section, chapterPath, blobs) {
     img.removeAttribute(attr);
     img.removeAttributeNS(XLINK_NS, 'href');
     const { path } = resolveHref(chapterPath, src);
-    loads.push(blobs.get(path).then(url => img.setAttribute(attr, url)));
+    loads.push(blobs.get(path).then((url) => img.setAttribute(attr, url)));
   }
+
   await Promise.all(loads);
 }
 
@@ -268,7 +298,9 @@ function savePosition() {
   if (!book) return;
 
   const sections = [...bookEl.children];
-  const index = sections.findIndex(s => s.getBoundingClientRect().bottom > 0);
+  const index = sections.findIndex(
+    (section) => section.getBoundingClientRect().bottom > 0,
+  );
   if (index === -1) return;
 
   const rect = sections[index].getBoundingClientRect();
@@ -311,38 +343,50 @@ async function restorePosition() {
 // Resolves once the current DOM has been laid out. A requestAnimationFrame
 // callback runs just before the next layout, so it takes two of them.
 function nextFrame() {
-  return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  return new Promise((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve)),
+  );
 }
 
 // --- Startup -----------------------------------------------------------------
 
 function openFile(file) {
   if (!file) return;
-  openBook(file).catch(err => {
+
+  openBook(file).catch((err) => {
     console.error(err);
     alert('Could not open that file as an EPUB.');
   });
 }
 
-dropEl.querySelector('input').addEventListener('change', e => openFile(e.target.files[0]));
+dropEl
+  .querySelector('input')
+  .addEventListener('change', (event) => openFile(event.target.files[0]));
 
-addEventListener('dragover', e => {
-  e.preventDefault();
+addEventListener('dragover', (event) => {
+  event.preventDefault();
   dropEl.classList.add('over');
 });
-addEventListener('dragleave', e => {
+
+addEventListener('dragleave', (event) => {
   // relatedTarget is null only when the drag leaves the window entirely.
-  if (!e.relatedTarget) dropEl.classList.remove('over');
+  if (!event.relatedTarget) dropEl.classList.remove('over');
 });
-addEventListener('drop', e => {
-  e.preventDefault();
+
+addEventListener('drop', (event) => {
+  event.preventDefault();
   dropEl.classList.remove('over');
-  openFile(e.dataTransfer.files[0]);
+  openFile(event.dataTransfer.files[0]);
 });
 
 let saveTimer;
-addEventListener('scroll', () => {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(savePosition, SAVE_DEBOUNCE_MS);
-}, { passive: true });
+addEventListener(
+  'scroll',
+  () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(savePosition, SAVE_DEBOUNCE_MS);
+  },
+  { passive: true },
+);
+
 addEventListener('pagehide', savePosition);

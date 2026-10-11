@@ -1,18 +1,24 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Reader</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-<link rel="stylesheet" href="reader.css">
-</head>
-<body>
-<div id="drop">
-  <div>Drop an .epub here, or <label>choose one<input type="file" accept=".epub,application/epub+zip"></label></div>
-</div>
-<main id="book"></main>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Reader</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <link rel="stylesheet" href="reader.css">
+  </head>
+  <body>
+    <div id="drop">
+      <div>
+        Drop an .epub here, or
+        <label>
+          choose one
+          <input type="file" accept=".epub,application/epub+zip">
+        </label>
+      </div>
+    </div>
+    <main id="book"></main>
 
-<script src="reader.js"></script>
-</body>
+    <script src="reader.js"></script>
+  </body>
 </html>

@@ -5,38 +5,121 @@
   --rule: #dcd8cf;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #1a1a19; --fg: #d9d6cf; --muted: #7d7a73; --rule: #3a3936; }
+  :root {
+    --bg: #1a1a19;
+    --fg: #d9d6cf;
+    --muted: #7d7a73;
+    --rule: #3a3936;
+  }
 }
-html { background: var(--bg); color: var(--fg); }
+
+html {
+  background: var(--bg);
+  color: var(--fg);
+}
+
 body {
   margin: 0;
   font: 19px/1.6 Charter, "Iowan Old Style", Georgia, serif;
 }
+
 #drop {
-  position: fixed; inset: 0;
-  display: grid; place-items: center;
-  color: var(--muted); font-family: system-ui, sans-serif; font-size: 15px;
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-family: system-ui, sans-serif;
+  font-size: 15px;
   text-align: center;
 }
-#drop[hidden] { display: none; }
-#drop.over { background: color-mix(in srgb, var(--fg) 6%, transparent); }
-#drop label { text-decoration: underline; cursor: pointer; }
-#drop input { display: none; }
-#book { max-width: 34em; margin: 0 auto; padding: 4em 1.25em 40vh; }
-#book:empty { display: none; }
+
+#drop[hidden] {
+  display: none;
+}
+
+#drop.over {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+
+#drop label {
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+#drop input {
+  display: none;
+}
+
+#book {
+  max-width: 34em;
+  margin: 0 auto;
+  padding: 4em 1.25em 40vh;
+}
+
+#book:empty {
+  display: none;
+}
 
 /* Skip layout and paint for chapters far off screen. 12000px is roughly an
    average chapter; `auto` remembers each one's real height once rendered. */
-#book section { content-visibility: auto; contain-intrinsic-block-size: auto 12000px; }
+#book section {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 12000px;
+}
+
 /* Placeholder for a chapter that couldn't be read; keeps section index == spine index. */
-#book section:empty { display: none; }
+#book section:empty {
+  display: none;
+}
 
 /* Book content: our typography, not the publisher's */
-#book section + section { border-top: 1px solid var(--rule); margin-top: 4em; padding-top: 4em; }
-#book p { margin: 0; text-indent: 1.5em; }
-#book p:first-child, #book section > p:first-of-type, #book h1 + p, #book h2 + p, #book h3 + p, #book hr + p { text-indent: 0; }
-#book h1, #book h2, #book h3 { line-height: 1.25; margin: 1.5em 0 1em; text-align: center; }
-#book img, #book svg { max-width: 100%; height: auto; display: block; margin: 1em auto; }
-#book a { color: inherit; }
-#book blockquote { margin: 1em 2em; }
-#book .center, #book [align="center"] { text-align: center; text-indent: 0; }
+#book section + section {
+  margin-top: 4em;
+  padding-top: 4em;
+  border-top: 1px solid var(--rule);
+}
+
+#book p {
+  margin: 0;
+  text-indent: 1.5em;
+}
+
+#book p:first-child,
+#book section > p:first-of-type,
+#book h1 + p,
+#book h2 + p,
+#book h3 + p,
+#book hr + p {
+  text-indent: 0;
+}
+
+#book h1,
+#book h2,
+#book h3 {
+  margin: 1.5em 0 1em;
+  line-height: 1.25;
+  text-align: center;
+}
+
+#book img,
+#book svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1em auto;
+}
+
+#book a {
+  color: inherit;
+}
+
+#book blockquote {
+  margin: 1em 2em;
+}
+
+#book .center,
+#book [align="center"] {
+  text-align: center;
+  text-indent: 0;
+}
