@@ -1,0 +1,348 @@
+// Renders an EPUB as one long scrolling page.
+//
+// The file is unzipped with JSZip. META-INF/container.xml points at the OPF
+// package, whose manifest lists the book's files and whose spine lists the
+// chapters in reading order. Each spine chapter becomes one <section> in #book:
+// publisher styling is stripped, ids are prefixed to stay unique on the page,
+// images are swapped for blob URLs and links become in-page anchors.
+//
+// Section index == spine index everywhere: in section ids, in rewritten links
+// and in the saved reading position.
+//
+// The reading position is saved to localStorage per book as (section index,
+// fraction through that section), so it survives changes to window width and
+// font size.
+
+const XLINK_NS = 'http://www.w3.org/1999/xlink';
+const SAVE_DEBOUNCE_MS = 200;
+const RESTORE_MAX_ATTEMPTS = 5;
+const RESTORE_TOLERANCE_PX = 2;
+
+const dropEl = document.getElementById('drop');
+const bookEl = document.getElementById('book');
+
+// The book on screen, or null before the first open and while a new book is
+// being put on screen. Positions are only saved while this is set.
+//   key:   localStorage key for the reading position
+//   blobs: the BlobUrls its images point at
+let book = null;
+
+function closeBook() {
+  book?.blobs.revokeAll();
+  book = null;
+}
+
+// --- Paths -------------------------------------------------------------------
+
+function dirname(path) {
+  const i = path.lastIndexOf('/');
+  return i === -1 ? '' : path.slice(0, i + 1);
+}
+
+// Resolves `href` as written inside the zip file at `fromPath`, returning the
+// target's zip path and its #fragment (without the '#'). A bare "#id" points
+// into `fromPath` itself.
+function resolveHref(fromPath, href) {
+  const [relPath, hash = ''] = href.split('#');
+  if (!relPath) return { path: fromPath, hash };
+
+  const out = [];
+  for (const part of (dirname(fromPath) + decodeURIComponent(relPath)).split('/')) {
+    if (part === '..') out.pop();
+    else if (part !== '.' && part !== '') out.push(part);
+  }
+  return { path: out.join('/'), hash };
+}
+
+// True for hrefs with a scheme (http:, mailto:, ...), which point outside the book.
+function isExternal(href) {
+  return /^[a-z][a-z0-9+.-]*:/i.test(href);
+}
+
+// Ids from every chapter share one page, so each is prefixed with its section:
+// chapter 3's "note1" becomes "s3-note1", and the section itself is "s3".
+function sectionId(index, id) {
+  return id ? `s${index}-${id}` : `s${index}`;
+}
+
+// --- Blob URLs ---------------------------------------------------------------
+
+// Blob URLs for files inside one book's zip. Each path gets a single URL,
+// created on first use. revokeAll() frees them once the book is closed.
+class BlobUrls {
+  #zip;
+  #typeByPath;
+  #urls = new Map(); // path -> Promise<url>
+
+  constructor(zip, typeByPath) {
+    this.#zip = zip;
+    this.#typeByPath = typeByPath;
+  }
+
+  get(path) {
+    if (!this.#urls.has(path)) this.#urls.set(path, this.#create(path));
+    return this.#urls.get(path);
+  }
+
+  revokeAll() {
+    for (const url of this.#urls.values()) url.then(URL.revokeObjectURL);
+  }
+
+  async #create(path) {
+    // A missing image just shows as broken; not worth failing the book over.
+    const entry = this.#zip.file(path);
+    if (!entry) return '';
+
+    // The media type matters for SVG, which won't render from a blob URL without it.
+    const bytes = await entry.async('uint8array');
+    const blob = new Blob([bytes], { type: this.#typeByPath.get(path) ?? '' });
+    return URL.createObjectURL(blob);
+  }
+}
+
+// --- Loading -----------------------------------------------------------------
+
+// Loads an EPUB and replaces the book on screen with it. Throws if the file
+// isn't a usable EPUB.
+async function openBook(file) {
+  const zip = await JSZip.loadAsync(file);
+  const { title, identifier, spine, typeByPath } = await readPackage(zip);
+
+  const ctx = {
+    zip,
+    blobs: new BlobUrls(zip, typeByPath),
+    sectionIndexByPath: new Map(spine.map((path, index) => [path, index])),
+  };
+  const sections = await Promise.all(spine.map((path, index) => loadChapter(ctx, path, index)));
+
+  // Close first so nothing is saved until the new position is restored:
+  // swapping content scrolls the page, and that scroll must not overwrite the
+  // old book's saved position.
+  closeBook();
+  bookEl.replaceChildren(...sections);
+  document.title = title || file.name;
+  dropEl.hidden = true;
+
+  // Images change the layout once they have a size, so wait for them before
+  // restoring. decode() rejects for broken images, which have no size to wait for.
+  const images = [...bookEl.querySelectorAll('img')];
+  await Promise.all(images.map(img => img.decode().catch(() => {})));
+
+  book = { key: `reader:pos:${identifier || file.name}`, blobs: ctx.blobs };
+  await restorePosition();
+}
+
+// Reads container.xml and the OPF package it points at. Returns the book's
+// title and identifier (either may be undefined), the spine as zip paths in
+// reading order, and a map from zip path to media type.
+async function readPackage(zip) {
+  const container = await readXml(zip, 'META-INF/container.xml');
+  const opfPath = container.querySelector('rootfile').getAttribute('full-path');
+  const opf = await readXml(zip, opfPath);
+
+  const pathById = new Map();
+  const typeByPath = new Map();
+  for (const item of opf.querySelectorAll('manifest > item')) {
+    const { path } = resolveHref(opfPath, item.getAttribute('href'));
+    pathById.set(item.getAttribute('id'), path);
+    typeByPath.set(path, item.getAttribute('media-type'));
+  }
+
+  // linear="no" marks supplementary chapters (e.g. popup footnotes) that
+  // aren't part of the reading flow, so they're left out.
+  const spine = [...opf.querySelectorAll('spine > itemref')]
+    .filter(ref => ref.getAttribute('linear') !== 'no')
+    .map(ref => pathById.get(ref.getAttribute('idref')))
+    .filter(Boolean);
+
+  const metadata = name => opf.getElementsByTagNameNS('*', name)[0]?.textContent.trim();
+  return { title: metadata('title'), identifier: metadata('identifier'), spine, typeByPath };
+}
+
+// Throws if the file is missing, which openFile reports as a bad EPUB.
+async function readXml(zip, path) {
+  const text = await zip.file(path).async('text');
+  return new DOMParser().parseFromString(text, 'application/xml');
+}
+
+// Builds the <section> for one spine chapter. A missing or unreadable chapter
+// still gets an (empty, hidden) section, so section index == spine index.
+async function loadChapter(ctx, path, index) {
+  const section = document.createElement('section');
+  section.id = sectionId(index);
+
+  const body = await readChapterBody(ctx.zip, path);
+  if (!body) return section;
+
+  for (const node of [...body.childNodes]) section.append(document.importNode(node, true));
+  cleanMarkup(section);
+  for (const el of section.querySelectorAll('[id]')) el.id = sectionId(index, el.id);
+  rewriteLinks(section, path, ctx.sectionIndexByPath);
+  await rewriteImages(section, path, ctx.blobs);
+  return section;
+}
+
+// Returns the chapter's <body>, or null if the chapter file is missing.
+async function readChapterBody(zip, path) {
+  const entry = zip.file(path);
+  if (!entry) return null;
+  const text = await entry.async('text');
+
+  // Chapters should be XHTML, but some books ship HTML that isn't valid XML,
+  // so fall back to the forgiving HTML parser.
+  let doc = new DOMParser().parseFromString(text, 'application/xhtml+xml');
+  if (doc.querySelector('parsererror')) {
+    doc = new DOMParser().parseFromString(text, 'text/html');
+  }
+
+  // doc.body only finds a <body> in the XHTML namespace; some files leave it out.
+  return doc.body ?? doc.getElementsByTagName('body')[0] ?? null;
+}
+
+// Strips whatever would fight our typography: scripts, stylesheets and inline
+// styles. Also replaces headings with no text (e.g. untitled chapters), which
+// would leave big empty gaps, with empty spans carrying their ids so links to
+// them still work.
+function cleanMarkup(section) {
+  for (const el of section.querySelectorAll('script, style, link, meta')) el.remove();
+  for (const el of section.querySelectorAll('[style]')) el.removeAttribute('style');
+
+  for (const heading of section.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
+    const isEmpty = !heading.textContent.trim() && !heading.querySelector('img, svg');
+    if (!isEmpty) continue;
+
+    const ids = [heading, ...heading.querySelectorAll('[id]')].map(el => el.id).filter(Boolean);
+    heading.replaceWith(...ids.map(id => {
+      const span = document.createElement('span');
+      span.id = id;
+      return span;
+    }));
+  }
+}
+
+// Turns links between chapters into in-page anchors and opens external links
+// in a new tab. Links to anything we didn't render (e.g. linear="no" chapters)
+// are unlinked.
+function rewriteLinks(section, chapterPath, sectionIndexByPath) {
+  for (const a of section.querySelectorAll('a[href]')) {
+    const href = a.getAttribute('href');
+    if (isExternal(href)) {
+      a.target = '_blank';
+      a.rel = 'noopener';
+      continue;
+    }
+
+    const { path, hash } = resolveHref(chapterPath, href);
+    const target = sectionIndexByPath.get(path);
+    if (target === undefined) {
+      a.removeAttribute('href');
+      continue;
+    }
+    a.setAttribute('href', '#' + sectionId(target, hash));
+  }
+}
+
+// Points images at blob URLs for their files in the zip: HTML <img src> and SVG
+// <image href> (or the older xlink:href). The relative URL is removed right
+// away so the browser doesn't try to fetch it from the page's own location.
+async function rewriteImages(section, chapterPath, blobs) {
+  const loads = [];
+  for (const img of section.querySelectorAll('img, image')) {
+    const attr = img.localName === 'img' ? 'src' : 'href';
+    const src = img.getAttribute(attr) || img.getAttributeNS(XLINK_NS, 'href');
+    if (!src || isExternal(src)) continue;
+
+    img.removeAttribute(attr);
+    img.removeAttributeNS(XLINK_NS, 'href');
+    const { path } = resolveHref(chapterPath, src);
+    loads.push(blobs.get(path).then(url => img.setAttribute(attr, url)));
+  }
+  await Promise.all(loads);
+}
+
+// --- Reading position --------------------------------------------------------
+
+// Saves which section is at the top of the viewport and how far through it we
+// are. That section is the first one whose bottom is still below the top edge.
+function savePosition() {
+  if (!book) return;
+
+  const sections = [...bookEl.children];
+  const index = sections.findIndex(s => s.getBoundingClientRect().bottom > 0);
+  if (index === -1) return;
+
+  const rect = sections[index].getBoundingClientRect();
+  const fraction = Math.max(0, -rect.top) / rect.height;
+
+  // localStorage can throw (e.g. storage disabled); losing the position is fine.
+  try {
+    localStorage.setItem(book.key, JSON.stringify({ section: index, fraction }));
+  } catch {}
+}
+
+// Scrolls to the saved position, or to the top if there isn't one.
+//
+// Sections far off screen have placeholder heights (content-visibility), so
+// scroll to the section first, let it and its neighbours render, then apply
+// the fraction against real heights. Repeat until the target stops moving.
+async function restorePosition() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(book.key));
+  } catch {}
+
+  const section = saved && bookEl.children[saved.section];
+  if (!section) {
+    scrollTo(0, 0);
+    return;
+  }
+
+  let target = section.offsetTop;
+  for (let attempt = 0; attempt < RESTORE_MAX_ATTEMPTS; attempt++) {
+    scrollTo(0, target);
+    await nextFrame();
+
+    const next = Math.round(section.offsetTop + saved.fraction * section.offsetHeight);
+    if (Math.abs(next - scrollY) < RESTORE_TOLERANCE_PX) break;
+    target = next;
+  }
+}
+
+// Resolves once the current DOM has been laid out. A requestAnimationFrame
+// callback runs just before the next layout, so it takes two of them.
+function nextFrame() {
+  return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
+// --- Startup -----------------------------------------------------------------
+
+function openFile(file) {
+  if (!file) return;
+  openBook(file).catch(err => {
+    console.error(err);
+    alert('Could not open that file as an EPUB.');
+  });
+}
+
+dropEl.querySelector('input').addEventListener('change', e => openFile(e.target.files[0]));
+
+addEventListener('dragover', e => {
+  e.preventDefault();
+  dropEl.classList.add('over');
+});
+addEventListener('dragleave', e => {
+  // relatedTarget is null only when the drag leaves the window entirely.
+  if (!e.relatedTarget) dropEl.classList.remove('over');
+});
+addEventListener('drop', e => {
+  e.preventDefault();
+  dropEl.classList.remove('over');
+  openFile(e.dataTransfer.files[0]);
+});
+
+let saveTimer;
+addEventListener('scroll', () => {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(savePosition, SAVE_DEBOUNCE_MS);
+}, { passive: true });
+addEventListener('pagehide', savePosition);
